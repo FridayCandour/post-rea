@@ -50,6 +50,20 @@ const DATE_IN_PATH =
 const PAGINATION_PATH = /\/page\/\d+\/?$/i;
 const PAGINATION_QUERY = /[?&](?:paged|page|pg|offset)=\d+/i;
 
+/**
+ * URL shapes we should never *crawl through* (they are not navigation pages).
+ * Category/tag/author/archive hubs are intentionally NOT listed here: they are
+ * exactly the pages a recursive crawl has to walk through.
+ */
+const CRAWL_BLOCKERS = [
+  /\/wp-(?:admin|json|content|includes|login\.php)/i,
+  /\/(?:feed|rss|atom)(?:\/|$)/i,
+  /\/(?:cart|checkout|account|login|signin|sign-in|signup|register|subscribe|unsubscribe)(?:\/|$|\?)/i,
+  /[?&](?:replytocom|add-to-cart|preview=true|action=|s=)/i,
+  /\/(?:sitemap|robots)[^/]*$/i,
+  /\/cdn-cgi\//i,
+];
+
 function safeUrl(input, base = 'https://example.invalid') {
   try {
     return new URL(input, base);
@@ -73,6 +87,22 @@ export function isAssetUrl(input) {
   const url = input instanceof URL ? input : safeUrl(input);
   if (!url) return false;
   return ASSET_EXTENSIONS.test(url.pathname);
+}
+
+/**
+ * True when a URL is a navigation page worth loading while looking for posts
+ * (listing, category, archive, landing page…). Assets, feeds, auth and search
+ * URLs are rejected.
+ */
+export function isCrawlablePage(input) {
+  const url = input instanceof URL ? input : safeUrl(input);
+  if (!url) return false;
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+
+  const path = decodeURIComponent(url.pathname);
+  if (ASSET_EXTENSIONS.test(path)) return false;
+  if (CRAWL_BLOCKERS.some((pattern) => pattern.test(`${path}${url.search}`))) return false;
+  return true;
 }
 
 /** Root, `/page/2`, `/blog`, `/blog/category/x` ... are listings, not posts. */

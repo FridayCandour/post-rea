@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { escapeHtml, humanBytes } from './util.mjs';
 
-export function buildManifest({ seed, startedAt, finishedAt, posts, failures, candidates, listings, options }) {
+export function buildManifest({ seed, startedAt, finishedAt, posts, failures, candidates, pages, options }) {
   return {
     generator: 'blog-post-archiver',
     version: '1.0.0',
@@ -13,12 +13,12 @@ export function buildManifest({ seed, startedAt, finishedAt, posts, failures, ca
       candidates: candidates ?? posts.length + failures.length,
       downloaded: posts.length,
       failed: failures.length,
-      listingPages: Array.isArray(listings) ? listings.length : 0,
+      pagesCrawled: Array.isArray(pages) ? pages.length : 0,
     },
     options,
     posts,
     failures,
-    listings: Array.isArray(listings) ? listings : [],
+    pages: Array.isArray(pages) ? pages : [],
   };
 }
 

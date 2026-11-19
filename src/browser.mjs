@@ -35,11 +35,15 @@ export async function createPage(browser, opts) {
   return page;
 }
 
-/** Navigate and give the page a bounded chance to finish its network work. */
-export async function openPage(page, url, opts) {
+/**
+ * Navigate and give the page a bounded chance to finish its network work.
+ * Discovery uses a short settle window (links are usually in the served HTML),
+ * archiving uses the longer default so late images/styles are captured.
+ */
+export async function openPage(page, url, opts, { idleTime = 600, idleTimeout = 20000 } = {}) {
   const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: opts.timeout });
   await page
-    .waitForNetworkIdle({ idleTime: 600, concurrency: 2, timeout: Math.min(opts.timeout, 20000) })
+    .waitForNetworkIdle({ idleTime, concurrency: 2, timeout: Math.min(opts.timeout, idleTimeout) })
     .catch(() => {});
   return response;
 }

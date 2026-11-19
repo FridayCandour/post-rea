@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { DEFAULT_USER_AGENT, launchBrowser } from './browser.mjs';
 import { captureMhtml, capturePage } from './archive.mjs';
-import { crawlListing, mergeCandidates } from './crawler.mjs';
+import { crawlSite, mergeCandidates } from './crawler.mjs';
 import { discoverFromSitemaps } from './sitemap.mjs';
 import { loadRobots } from './robots.mjs';
 import { buildManifest, writeOutputs } from './report.mjs';
@@ -26,6 +26,7 @@ const CLI_OPTIONS = {
   out: { type: 'string', short: 'o' },
   'max-posts': { type: 'string', short: 'n' },
   'max-pages': { type: 'string' },
+  depth: { type: 'string', short: 'd' },
   concurrency: { type: 'string', short: 'c' },
   delay: { type: 'string' },
   timeout: { type: 'string' },
@@ -43,6 +44,7 @@ const CLI_OPTIONS = {
   'no-pagination': { type: 'boolean' },
   'ignore-robots': { type: 'boolean' },
   'allow-external': { type: 'boolean' },
+  'crawl-subdomains': { type: 'boolean' },
   sitemap: { type: 'boolean' },
   'dry-run': { type: 'boolean' },
   headful: { type: 'boolean' },
@@ -53,7 +55,8 @@ const CLI_OPTIONS = {
 
 const HELP = `
 blog-post-archiver ${VERSION}
-Crawl a blog page and download every blog post it links to as a single,
+Recursively crawl a blog/resources page (following category and archive hubs up
+to --depth hops) and download every blog post it can reach as a single,
 self-contained HTML file (CSS inlined, images/fonts embedded, JS stripped).
 
 USAGE
@@ -61,8 +64,11 @@ USAGE
   npm start -- <url> [options]
 
 EXAMPLES
-  # Crawl a blog index, save up to 25 posts
+  # Crawl a blog index recursively (seed → hubs → posts)
   node bin/blog-archiver.mjs https://example.com/blog
+
+  # Deeper resources site: 3 hops, 150 pages of discovery, up to 500 posts
+  node bin/blog-archiver.mjs https://example.com/resources -d 3 --max-pages 150 -n 500
 
   # Save 10 posts into ./archive, following pagination, all posts from sitemaps
   node bin/blog-archiver.mjs https://example.com/blog -n 10 -o ./archive --sitemap
@@ -76,7 +82,9 @@ EXAMPLES
 OPTIONS
   -o, --out <dir>         output directory (default: <this folder>/downloads/<site>)
   -n, --max-posts <n>     maximum number of posts to download (default: 25)
-      --max-pages <n>     listing pages to crawl for discovery (default: 10)
+      --max-pages <n>     pages to load while discovering posts (default: 50)
+  -d, --depth <n>         how many link hops to follow from the seed (default: 2)
+      --crawl-subdomains  let the crawl walk into sibling subdomains
   -c, --concurrency <n>   parallel post downloads (default: 2)
       --delay <ms>        delay before each post request (default: 600)
       --timeout <ms>      navigation timeout (default: 45000)
@@ -142,7 +150,8 @@ function printCandidates(candidates, log) {
   log.info('detected posts:');
   for (const candidate of candidates) {
     const flags = candidate.forced ? ' [include]' : '';
-    log.info(`  ${candidate.score.toFixed(1).padStart(5)}  ${candidate.url}${flags}`);
+    const depth = `d${candidate.depth ?? 0}`;
+    log.info(`  ${candidate.score.toFixed(1).padStart(5)}  ${depth}  ${candidate.url}${flags}`);
     log.detail(`         ${candidate.reasons.join(', ')}`);
   }
 }
@@ -202,7 +211,8 @@ export async function run(argv = process.argv.slice(2)) {
       seedUrl: seed.href,
       format,
       maxPosts: numberOption(values, 'max-posts', 25, { min: 1, integer: true }),
-      maxPages: numberOption(values, 'max-pages', 10, { min: 1, integer: true }),
+      maxPages: numberOption(values, 'max-pages', 50, { min: 1, integer: true }),
+      depth: numberOption(values, 'depth', 2, { min: 0, integer: true }),
       concurrency: numberOption(values, 'concurrency', 2, { min: 1, integer: true }),
       delay: numberOption(values, 'delay', 600, { min: 0 }),
       timeout: numberOption(values, 'timeout', 45000, { min: 1000 }),
@@ -217,6 +227,7 @@ export async function run(argv = process.argv.slice(2)) {
       followPagination: !values['no-pagination'],
       ignoreRobots: Boolean(values['ignore-robots']),
       allowExternal: Boolean(values['allow-external']),
+      crawlSubdomains: Boolean(values['crawl-subdomains']),
       sitemap: Boolean(values.sitemap),
       downloadAssets: !values['no-assets'],
       dryRun: Boolean(values['dry-run']),
@@ -251,7 +262,7 @@ export async function run(argv = process.argv.slice(2)) {
   const failures = [];
 
   try {
-    const discovery = await crawlListing({ browser, seedUrl: config.seedUrl, opts: config, robots, log });
+    const discovery = await crawlSite({ browser, seedUrl: config.seedUrl, opts: config, robots, log });
     let candidates = discovery.candidates;
 
     if (config.sitemap) {
@@ -260,11 +271,26 @@ export async function run(argv = process.argv.slice(2)) {
     }
 
     candidates.sort(
-      (a, b) => Number(b.forced) - Number(a.forced) || b.score - a.score || a.url.localeCompare(b.url),
+      (a, b) =>
+        Number(b.forced) - Number(a.forced) ||
+        b.score - a.score ||
+        (a.depth ?? 0) - (b.depth ?? 0) ||
+        a.url.localeCompare(b.url),
     );
     const selected = candidates.slice(0, config.maxPosts);
 
-    log.info(`listing pages crawled: ${discovery.listings.length}`);
+    log.info(`pages crawled: ${discovery.pages.length} (depth ≤ ${config.depth})`);
+    if (discovery.pages.length) {
+      const byDepth = new Map();
+      for (const page of discovery.pages) byDepth.set(page.depth, (byDepth.get(page.depth) || 0) + 1);
+      log.detail(
+        `depth breakdown: ${[...byDepth.entries()]
+          .sort((a, b) => a[0] - b[0])
+          .map(([depth, count]) => `d${depth}=${count}`)
+          .join(', ')}`,
+      );
+    }
+    log.info(`post candidates: ${candidates.length}`);
     if (config.include) {
       const kept = candidates.filter((candidate) => config.include.test(candidate.url)).length;
       log.detail(`include filter matched ${kept} candidate(s)`);
@@ -348,13 +374,15 @@ export async function run(argv = process.argv.slice(2)) {
       posts,
       failures,
       candidates: candidates.length,
-      listings: discovery.listings,
+      pages: discovery.pages,
       options: {
         format: config.format,
         maxPosts: config.maxPosts,
         maxPages: config.maxPages,
+        depth: config.depth,
         minScore: config.minScore,
         sitemap: config.sitemap,
+        crawlSubdomains: config.crawlSubdomains,
         keepScripts: config.keepScripts,
         clean: config.clean,
         downloadAssets: config.downloadAssets,

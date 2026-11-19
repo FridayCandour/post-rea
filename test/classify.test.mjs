@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { classifyPost, isListingUrl, looksLikePagination, sectionBase } from '../src/classify.mjs';
+import { classifyPost, isCrawlablePage, isListingUrl, looksLikePagination, sectionBase } from '../src/classify.mjs';
+import { isLeafUnderHub } from '../src/crawler.mjs';
 import { normalizeUrl, sameSite, siteOf, slugify } from '../src/util.mjs';
 import { isAllowedByRobots, parseRobots } from '../src/robots.mjs';
 import { AssetRegistry, rewriteCssUrls } from '../src/assets.mjs';
@@ -18,6 +19,9 @@ const posts = [
   'https://example.com/my-first-post',
   'https://example.com/engineering/how-we-scaled-to-a-million-sms',
   'https://example.com/insights/the-future-of-a2p-messaging',
+  'https://lp.sent.dm/resources/code-examples/vonage-node-js-vite-react-vue-marketing-campaigns',
+  'https://lp.sent.dm/resources/tools/fcc-direct-numbering-authorization-voip',
+  'https://lp.sent.dm/resources/area-code/area-code-201',
 ];
 
 const notPosts = [
@@ -53,6 +57,51 @@ test('classifyPost rejects listing, chrome and asset URLs', () => {
     const verdict = classifyPost(url);
     assert.equal(verdict.isPost, false, `${url} should not be a post (score ${verdict.score}: ${verdict.reasons})`);
   }
+});
+
+test('crawlable pages include navigation hubs but never assets/feeds/auth', () => {
+  for (const url of [
+    'https://lp.sent.dm/resources',
+    'https://lp.sent.dm/resources/categories/tools',
+    'https://lp.sent.dm/resources/categories/tools?page=2',
+    'https://example.com/blog/page/2',
+    'https://example.com/about',
+  ]) {
+    assert.equal(isCrawlablePage(url), true, `${url} should be crawlable`);
+  }
+
+  for (const url of [
+    'https://example.com/blog/feed',
+    'https://example.com/rss',
+    'https://example.com/wp-admin/',
+    'https://example.com/wp-json/wp/v2/posts',
+    'https://example.com/login',
+    'https://example.com/assets/main.js',
+    'https://example.com/sitemap.xml',
+    'https://example.com/search?s=sms',
+  ]) {
+    assert.equal(isCrawlablePage(url), false, `${url} should not be crawlable`);
+  }
+});
+
+test('leaf-under-hub detection links hubs to their sibling-depth pages', () => {
+  assert.equal(
+    isLeafUnderHub('https://lp.sent.dm/resources/categories/tools', 'https://lp.sent.dm/resources/tools/fcc-numbering'),
+    true,
+  );
+  assert.equal(isLeafUnderHub('https://lp.sent.dm/resources/categories/legal', 'https://lp.sent.dm/resources/legal/gdpr-checklist'), true);
+  // Different top-level section → not a leaf link (nav/footer links stay out).
+  assert.equal(isLeafUnderHub('https://example.com/blog', 'https://example.com/about'), false);
+  assert.equal(isLeafUnderHub('https://example.com/blog', 'https://example.com/my-first-post'), false);
+  assert.equal(
+    isLeafUnderHub('https://example.com/blog/page/2', 'https://example.com/blog/my-post'),
+    false,
+  );
+  assert.equal(isLeafUnderHub('https://example.com/', 'https://example.com/blog'), false);
+  // Sibling marketing pages / self links must not qualify.
+  assert.equal(isLeafUnderHub('https://example.com/product/sms', 'https://example.com/product/rcs'), false);
+  assert.equal(isLeafUnderHub('https://example.com/pricing', 'https://example.com/pricing'), false);
+  assert.equal(isLeafUnderHub('https://example.com/product', 'https://example.com/pricing'), false);
 });
 
 test('listing detection covers roots, sections and pagination', () => {

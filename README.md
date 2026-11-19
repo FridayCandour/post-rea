@@ -1,20 +1,22 @@
 # post-rea
 
-Point it at a blog page → it finds the blog posts linked from that page → it
-saves **each post as one self-contained `.html` file** that looks exactly like
-the original when opened offline.
+Point it at a blog page → it **recursively crawls** that page (and its category /
+archive / pagination hubs) → it saves **each post as one self-contained `.html`
+file** that looks exactly like the original when opened offline.
 
-- **Crawls** the seed page and follows blog pagination (`/blog/page/2`,
-  `?paged=2`, "Older posts"…), so a 10-post index still yields the whole blog.
+- **Recursive crawl** (breadth-first, `--depth` hops, `--max-pages` budget):
+  follows listings, category/tag hubs, archives and pagination, so posts buried
+  two or three clicks deep are found — not just the links on the seed page.
 - **Detects posts** with explainable URL/anchor heuristics (skips categories,
-  tags, authors, feeds, assets, pricing/about pages…).
+  tags, authors, feeds, assets, pricing/about pages…) plus a "leaf under hub"
+  rule for resources sites whose article slugs are too short to score.
 - **Inlines everything** into the HTML: stylesheets (including `@import`
   chains), web fonts, images, background images, `srcset`, icons — all as
   `data:` URIs. No broken CSS or missing pictures offline.
 - Removes JavaScript (keeps JSON-LD), rewrites links to absolute URLs, adds a
   provenance banner + `<meta name="archived-from">`.
 - Writes a local `index.html` and a `manifest.json` (title, author, date,
-  word count, size, failures).
+  word count, size, crawled pages, failures).
 
 ## Requirements
 
@@ -55,7 +57,9 @@ downloads/example.com/
 ```
 -o, --out <dir>         output directory (default: <this folder>/downloads/<site>)
 -n, --max-posts <n>     maximum number of posts to download (default: 25)
-    --max-pages <n>     listing pages to crawl for discovery (default: 10)
+    --max-pages <n>     pages to load while discovering posts (default: 50)
+-d, --depth <n>         how many link hops to follow from the seed (default: 2)
+    --crawl-subdomains  let the crawl walk into sibling subdomains
 -c, --concurrency <n>   parallel post downloads (default: 2)
     --delay <ms>        delay before each post request (default: 600)
     --timeout <ms>      navigation timeout (default: 45000)
@@ -70,7 +74,7 @@ downloads/example.com/
     --keep-scripts      do not strip <script> tags
     --keep-clutter      keep cookie/consent/popup overlays
     --no-banner         do not add the "archived from" banner
-    --no-pagination     stay on the seed page only
+    --no-pagination     do not follow pagination links
     --ignore-robots     ignore robots.txt
     --allow-external    allow posts on other domains
     --dry-run           list detected posts, do not download
@@ -83,11 +87,17 @@ downloads/example.com/
 ## Recipes
 
 ```bash
-# See what would be downloaded, with reasons for every score
+# See what would be downloaded, with reasons and depth for every candidate
 node bin/blog-archiver.mjs https://example.com/blog --dry-run -v
 
-# Archive the complete blog (sitemap discovery + pagination, 200 posts)
+# Recursive resources-site crawl: seed → category hubs → articles (3 hops)
+node bin/blog-archiver.mjs https://example.com/resources --depth 3 --max-pages 150 -n 500
+
+# Whole blog, including posts only reachable through sitemaps
 node bin/blog-archiver.mjs https://example.com/blog -n 200 --sitemap -c 2
+
+# Seed page only, no recursion at all
+node bin/blog-archiver.mjs https://example.com/blog --depth 0
 
 # Only posts about SMS deliverability (case-insensitive regex, no slashes needed)
 node bin/blog-archiver.mjs https://example.com/blog --include 'deliverab|dlt|a2p' -n 50
@@ -105,25 +115,50 @@ node bin/blog-archiver.mjs https://example.com/blog --format mhtml
 node bin/blog-archiver.mjs https://example.com/blog --headful -v -n 1
 ```
 
-Only pages that are *detected* as posts are downloaded. If a site uses unusual
-URLs, `--dry-run -v` shows the exact score/reasons, and `--include` /
-`--min-score` let you tune it.
+Only pages that are *detected* as posts are downloaded; every other in-scope
+page is treated as navigation and walked through. If a site uses unusual URLs,
+`--dry-run -v` shows the exact score/reasons/depth, and `--include` /
+`--min-score` let you tune it. When the crawl stops because of `--max-pages`
+it tells you how many pages were left unvisited.
+
+### Recursive crawl details
+
+- **`--depth`** counts link hops from the seed: the seed is `d0`, pages it links
+  to are `d1`, their children `d2`, and so on. Pagination never consumes depth
+  (`/blog/page/2` stays at the same level as `/blog`).
+- **Never recurses into posts**: once a page looks like a post it is downloaded
+  and its links are ignored, so the crawl does not wander through
+  related-post sidebars.
+- **Scope**: navigation stays on the seed host by default. Posts may live on any
+  subdomain of the same site (e.g. `blog.example.com`). Use
+  `--crawl-subdomains` to also walk through sibling subdomains, or
+  `--allow-external` to drop the scope limit entirely.
+- **Priority**: pages inside the seed's section and hub-like pages (categories,
+  archives, blog/news/resources/guides…) are visited first, so a small
+  `--max-pages` budget is spent where post links actually live.
+- **Leaf under hub**: when a hub page links to a sibling-depth page in its own
+  section (e.g. `/resources/categories/tools` → `/resources/tools/fcc-numbering`),
+  that page is treated as a post even if its slug is too short for the
+  URL-only heuristics.
 
 ## How it works
 
-1. **Discovery** (`src/crawler.mjs`)
-   Launches headless Chrome with CSP bypass, loads the seed page, collects every
-   `<a href>`, and follows pagination links that stay inside the same blog
-   section (bounded by `--max-pages`). Optional `--sitemap` adds every URL from
+1. **Recursive discovery** (`src/crawler.mjs`)
+   Launches headless Chrome with CSP bypass, loads the seed page, and performs a
+   breadth-first walk: every in-scope navigation link (listings, category/tag
+   hubs, archives, pagination, landing pages) is queued and visited up to
+   `--depth` hops or `--max-pages` pages. Links that look like posts are
+   recorded and never crawled through. Optional `--sitemap` adds every URL from
    `robots.txt` sitemaps, `/sitemap.xml`, `/sitemap_index.xml` and
    `/wp-sitemap.xml`.
 
-2. **Classification** (`src/classify.mjs`)
+2. **Classification** (`src/classify.mjs` + crawl context)
    Each link is scored: section (`/blog`, `/news`, `/insights`…), date in path
    (`/2024/05/…`), slug length/word count, numeric IDs (`?p=123`), anchor text.
    Hard negatives kill categories, tags, authors, feeds, pagination, auth,
-   legal, and asset URLs. Score ≥ `--min-score` (3) ⇒ post. Every contribution
-   is printed with `-v`.
+   legal, and asset URLs. Pages linked from a hub at the same depth get a
+   "leaf" boost. Score ≥ `--min-score` (3) ⇒ post. Every contribution is
+   printed with `-v`.
 
 3. **Snapshot** (`src/archive.mjs` + `src/assets.mjs`)
    The page is scrolled (to trigger lazy images), fonts are awaited, then the
@@ -146,8 +181,8 @@ URLs, `--dry-run -v` shows the exact score/reasons, and `--include` /
 
 5. **Report** (`src/report.mjs`)
    `manifest.json` (title, author, published date, canonical URL, word count,
-   bytes, asset counters, failures) plus a styled `index.html` to click through
-   the archive.
+   bytes, asset counters, crawled pages with their depth, failures) plus a
+   styled `index.html` to click through the archive.
 
 ## Respectful crawling
 
@@ -163,6 +198,15 @@ copyright rules before redistributing what you save.
 
 - **"Load more" / infinite scroll** driven by JS is not clicked; only real links
   are followed. Seed the archive page directly, or use `--sitemap`.
+- **Crawl budget**: recursion stops at `--depth` hops or `--max-pages` loaded
+  pages. Deeply nested sites need both raised (`--depth 4 --max-pages 400`); the
+  tool prints how many pages it left unvisited.
+- **Host scope**: by default only the seed host is walked (posts on sibling
+  subdomains are still downloaded). Sites that keep their article list on
+  `docs.example.com` while the seed is `www.example.com` need
+  `--crawl-subdomains`.
+- **Marketing pages** reachable from the header are crawled too once the blog
+  hubs are exhausted; they cost pages but do not produce posts.
 - **Login walls, paywalls, bot challenges** (Cloudflare Turnstile, hCaptcha) are
   not bypassed. `--headful` helps you see what happened.
 - **Iframes and video streams** keep their absolute URLs (a YouTube embed will
@@ -180,8 +224,9 @@ copyright rules before redistributing what you save.
 
 | Symptom | Fix |
 | --- | --- |
-| `no blog posts detected` | Try `--dry-run -v`, lower `--min-score 2`, or `--sitemap` |
-| Only 10 posts saved | Increase `--max-pages`, or add `--sitemap` |
+| `no blog posts detected` | Try `--dry-run -v`, lower `--min-score 2`, raise `--depth`, or `--sitemap` |
+| Only the seed page's posts found | Raise `--depth` (default 2) and `--max-pages` |
+| Crawl stops early ("N pages left unvisited") | Raise `--max-pages` (and/or `--depth`) |
 | Chrome not found | `npx puppeteer browsers install chrome` |
 | Post stops rendering early | Re-run just that URL with `--headful -v` |
 | Files are too big | `--no-assets`, `--max-asset-mb 2`, or `--max-asset-mb 0` |
