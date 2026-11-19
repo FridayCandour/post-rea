@@ -26,7 +26,7 @@ This folder lives inside the smsroute repo, which already depends on
 straight away from the repo root. To use it elsewhere:
 
 ```bash
-cd resource-ideas/post-rea
+cd post-rea
 npm install
 ```
 
@@ -34,7 +34,7 @@ npm install
 
 ```bash
 # from the repo root
-node resource-ideas/post-rea/bin/blog-archiver.mjs https://example.com/blog
+node post-rea/bin/blog-archiver.mjs https://example.com/blog
 
 # or from this folder
 npm start -- https://example.com/blog
