@@ -1,0 +1,6 @@
+# Crawled output
+downloads/
+*.mhtml
+
+# Local installs (puppeteer is normally resolved from the repo root)
+node_modules/

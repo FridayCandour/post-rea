@@ -1,0 +1,20 @@
+{
+  "name": "blog-post-archiver",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Crawl a blog index and download every blog post it links to as a single self-contained HTML file",
+  "type": "module",
+  "bin": {
+    "blog-archiver": "./bin/blog-archiver.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node ./bin/blog-archiver.mjs",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "puppeteer": "^24.42.0"
+  }
+}
