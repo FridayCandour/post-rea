@@ -392,7 +392,7 @@ export async function capturePage(browser, url, opts) {
     });
 
     const assembled = await assembleHtml({ ...payload, pageUrl: url }, opts);
-    return { html: assembled.html, meta, status, stats: assembled.stats };
+    return { content: assembled.html, meta, status, stats: assembled.stats };
   } finally {
     await page.close().catch(() => {});
   }
@@ -408,7 +408,7 @@ export async function captureMhtml(browser, url, opts) {
     const client = await page.createCDPSession();
     const { data } = await client.send('Page.captureSnapshot', { format: 'mhtml' });
     await client.detach().catch(() => {});
-    return { html: data, meta, status: 0, stats: { mhtml: true } };
+    return { content: data, meta, status: 0, stats: { mhtml: true } };
   } finally {
     await page.close().catch(() => {});
   }

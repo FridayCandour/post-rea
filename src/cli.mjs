@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { DEFAULT_USER_AGENT, launchBrowser } from './browser.mjs';
 import { captureMhtml, capturePage } from './archive.mjs';
+import { captureMarkdown } from './extract.mjs';
 import { crawlSite, mergeCandidates } from './crawler.mjs';
 import { discoverFromSitemaps } from './sitemap.mjs';
 import { loadRobots } from './robots.mjs';
@@ -43,6 +44,7 @@ const CLI_OPTIONS = {
   include: { type: 'string' },
   exclude: { type: 'string' },
   format: { type: 'string' },
+  md: { type: 'boolean' },
   'user-agent': { type: 'string' },
   'no-assets': { type: 'boolean' },
   'keep-scripts': { type: 'boolean' },
@@ -66,8 +68,9 @@ const CLI_OPTIONS = {
 const HELP = `
 blog-post-archiver ${VERSION}
 Recursively crawl a blog/resources page (following category and archive hubs up
-to --depth hops) and download every blog post it can reach as a single,
-self-contained HTML file (CSS inlined, images/fonts embedded, JS stripped).
+to --depth hops) and download every blog post it can reach — as a single,
+self-contained HTML file (CSS inlined, images/fonts embedded, JS stripped) or,
+with --md, as clean Markdown with YAML front matter.
 
 USAGE
   node bin/blog-archiver.mjs <url> [options]
@@ -82,6 +85,9 @@ EXAMPLES
 
   # Save 10 posts into ./archive, following pagination, all posts from sitemaps
   node bin/blog-archiver.mjs https://example.com/blog -n 10 -o ./archive --sitemap
+
+  # Markdown instead of HTML (article + YAML front matter, images stay remote)
+  node bin/blog-archiver.mjs https://example.com/blog --md -n 50
 
   # See what would be downloaded without saving anything
   node bin/blog-archiver.mjs https://example.com/blog --dry-run -v
@@ -104,7 +110,8 @@ OPTIONS
       --include <regex>   only URLs matching this regex (bypasses scoring)
       --exclude <regex>   skip URLs matching this regex
       --sitemap           also discover posts from sitemap.xml
-      --format <html|mhtml>  output format (default: html)
+      --format <html|mhtml|md>  output format (default: html)
+      --md                shorthand for --format md (article as Markdown)
       --no-assets         keep image/font URLs remote instead of inlining
       --keep-scripts      do not strip <script> tags
       --keep-clutter      keep cookie/consent/popup overlays
@@ -131,7 +138,8 @@ NOTES
   Existing posts in <out>/ are skipped on the next run (use --force to rebuild
   them), so an interrupted archive can simply be run again. The browser never
   downloads images, fonts or media — the archiver fetches those itself — which
-  makes captures roughly 3x faster.
+  makes captures roughly 3x faster. --md writes index.md instead of index.html
+  and never downloads assets.
 `.trim();
 
 function printHelp() {
@@ -194,9 +202,9 @@ export async function run(argv = process.argv.slice(2)) {
     return 2;
   }
 
-  const format = String(values.format || 'html').toLowerCase();
-  if (format !== 'html' && format !== 'mhtml') {
-    console.error('error: --format must be "html" or "mhtml"');
+  const format = values.md ? 'md' : String(values.format || 'html').toLowerCase();
+  if (!['html', 'mhtml', 'md'].includes(format)) {
+    console.error('error: --format must be "html", "mhtml" or "md"');
     return 2;
   }
 
@@ -426,15 +434,19 @@ export async function run(argv = process.argv.slice(2)) {
         const captured =
           config.format === 'mhtml'
             ? await captureMhtml(browser, candidate.url, config)
-            : await capturePage(browser, candidate.url, config);
+            : config.format === 'md'
+              ? await captureMarkdown(browser, candidate.url, config)
+              : await capturePage(browser, candidate.url, config);
 
         const destination = path.join(config.outDir, file);
         await fs.mkdir(path.dirname(destination), { recursive: true });
-        await fs.writeFile(destination, captured.html);
-        const bytes = Buffer.byteLength(captured.html);
-        log.info(
-          `${label} saved ${file} (${humanBytes(bytes)}, ${captured.stats.inlined ?? 0} asset(s) inlined)`,
-        );
+        await fs.writeFile(destination, captured.content);
+        const bytes = Buffer.byteLength(captured.content);
+        const detail =
+          config.format === 'md'
+            ? `${captured.stats.words ?? 0} words, ${captured.stats.headings ?? 0} heading(s)`
+            : `${captured.stats.inlined ?? 0} asset(s) inlined`;
+        log.info(`${label} saved ${file} (${humanBytes(bytes)}, ${detail})`);
         return { ok: true, candidate, file, bytes, meta: captured.meta, stats: captured.stats, status: captured.status };
       } catch (error) {
         log.error(`${label} failed: ${error.message}`);

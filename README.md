@@ -13,6 +13,8 @@ file** that looks exactly like the original when opened offline.
 - **Inlines everything** into the HTML: stylesheets (including `@import`
   chains), web fonts, images, background images, `srcset`, icons — all as
   `data:` URIs. No broken CSS or missing pictures offline.
+- **Or `--md`**: extract just the article and save it as clean, GitHub-flavored
+  Markdown with YAML front matter (no HTML chrome, no assets to download).
 - Removes JavaScript (keeps JSON-LD), rewrites links to absolute URLs, adds a
   provenance banner + `<meta name="archived-from">`.
 - Writes a local `index.html` and a `manifest.json` (title, author, date,
@@ -74,7 +76,8 @@ Rules used when mapping a URL to disk:
 Segments are decoded and sanitised (`?`, `:`, `/`, control chars, Windows
 reserved names, trailing dots, length > 120), and two URLs that collapse to the
 same folder get a short hash suffix so nothing is overwritten. Use `--flat` for
-the old flat `slug-hash.html` naming.
+the old flat `slug-hash.html` naming. With `--md` each page is `index.md`
+instead of `index.html`.
 
 Archives written by older versions (flat files) are reorganised automatically on
 the next run: each file's `archived-from` meta tag is read and the file is moved
@@ -98,7 +101,8 @@ into its folder. Saved pages now keep that meta tag as the **first** element of
     --include <regex>   only URLs matching this regex (bypasses scoring)
     --exclude <regex>   skip URLs matching this regex
     --sitemap           also discover posts from sitemap.xml
-    --format <html|mhtml>  output format (default: html)
+    --format <html|mhtml|md>  output format (default: html)
+    --md                shorthand for --format md (article as Markdown)
     --no-assets         keep image/font URLs remote instead of inlining
     --keep-scripts      do not strip <script> tags
     --keep-clutter      keep cookie/consent/popup overlays
@@ -142,6 +146,12 @@ node bin/blog-archiver.mjs https://example.com/blog --no-assets
 
 # Bullet-proof fallback: Chrome's own single-file snapshot
 node bin/blog-archiver.mjs https://example.com/blog --format mhtml
+
+# Markdown instead of HTML (front matter + article body, images stay remote)
+node bin/blog-archiver.mjs https://example.com/blog --md -n 50
+
+# Markdown for one page, flat naming
+node bin/blog-archiver.mjs https://example.com/blog/post-slug --md --depth 0 --flat
 
 # Debug a stubborn site in a visible browser
 node bin/blog-archiver.mjs https://example.com/blog --headful -v -n 1
@@ -216,6 +226,59 @@ it tells you how many pages were left unvisited.
    bytes, asset counters, crawled pages with their depth, failures) plus a
    styled `index.html` to click through the archive.
 
+## Markdown output (`--md`)
+
+`--md` (or `--format md`) skips the HTML snapshot entirely: it finds the main
+article container, strips navigation / share / cookie chrome, and saves the
+content as GitHub-flavored Markdown.
+
+```
+downloads/example.com/blog/post-slug/index.md
+```
+
+```markdown
+---
+title: "Build an Appointment Scheduler with SMS Reminders Using RedwoodJS and Vonage"
+source: "https://example.com/resources/code-examples/vonage-redwoodjs-scheduler"
+canonical: "https://www.example.com/resources/code-examples/vonage-redwoodjs-scheduler"
+published: "2025-05-03T00:31:58.667+00:00"
+description: "Learn how to build a full-stack appointment scheduling application…"
+site: "Sent Resources"
+lang: "en"
+archived: "2026-11-21T08:24:02.434Z"
+words: 6225
+---
+
+# Build an Appointment Scheduler with SMS Reminders Using RedwoodJS and Vonage
+
+Intro paragraph with **bold text** and a [link](https://example.com).
+
+## Prerequisites
+
+- Node.js 22
+- A Vonage API key
+
+![Screenshot of the scheduler](https://example.com/img/scheduler.png)
+```
+
+What the extractor does:
+
+- **Container detection**: `<article>`, `<main>`, `[itemprop=articleBody]` and
+  common content classes (`.post-content`, `.entry-content`, `.prose`, …),
+  scored by text length minus link density, with `<main>`/`<body>` fallback.
+- **Cleanup**: drops nav/footer/aside/forms, share/related/newsletter/comments
+  blocks, cookie banners, hidden nodes, and "12 min read" by-lines.
+- **Structure kept**: headings, paragraphs, nested ordered/unordered lists, GFM
+  tables, blockquotes, fenced code blocks with their language tag, figures
+  (image + italic caption), `<hr>`, and inline bold/italic/strikethrough/code/links.
+- **URLs** are absolutised, so the Markdown works in any viewer. Images are
+  **not** downloaded — with `--md` there is no asset pass at all.
+- **Front matter** keys: `title`, `source`, `canonical`, `author`, `published`,
+  `description`, `site`, `lang`, `archived`, `words`.
+
+Markdown is the fastest mode (~1–2 s per page) and still writes
+`manifest.json` + the browsable `index.html`.
+
 ## Speed
 
 Captures are dominated by page load and asset fetching, not by disk. The
@@ -286,6 +349,10 @@ copyright rules before redistributing what you save.
   correct; use `--load-media` if you need the exact variant a visitor would get.
 - Pages that render content only after interaction (tabs, accordions) are
   captured in their initial state.
+- **`--md` is a content extractor, not an exporter**: anything the site renders
+  without real text (interactive widgets, lazy-loaded comment threads) is
+  skipped, and article images stay as remote URLs so the Markdown remains
+  readable and small.
 
 ## Troubleshooting
 
@@ -317,7 +384,10 @@ src/crawler.mjs         link discovery + pagination
 src/classify.mjs        blog-post heuristics
 src/archive.mjs         in-page DOM freeze + token assembly
 src/assets.mjs          asset fetcher, registry, CSS inlining
-src/browser.mjs         Puppeteer page setup, autoscroll
+src/extract.mjs         article extraction + --md capture
+src/markdown.mjs        block tree → GitHub-flavored Markdown
+src/paths.mjs           URL → folder layout, legacy migration
+src/browser.mjs         Puppeteer page setup, autoscroll, resource blocking
 src/robots.mjs          robots.txt parsing/matching
 src/sitemap.mjs         sitemap discovery
 src/report.mjs          manifest + index.html

@@ -35,7 +35,7 @@ export function legacyFileNameFor(rawUrl, format = 'html') {
   const url = new URL(rawUrl);
   const segment = decodeURIComponent(url.pathname).replace(/\/+$/, '');
   const slug = slugify(segment || url.hostname, 70);
-  const extension = format === 'mhtml' ? 'mhtml' : 'html';
+  const extension = format === 'mhtml' ? 'mhtml' : format === 'md' ? 'md' : 'html';
   return `${slug}-${hashShort(rawUrl)}.${extension}`;
 }
 
@@ -72,7 +72,7 @@ export function archivePathFor(rawUrl, { format = 'html', seedHost = '', used } 
     used.set(directory.toLowerCase(), url.href);
   }
 
-  const file = format === 'mhtml' ? 'index.mhtml' : 'index.html';
+  const file = format === 'mhtml' ? 'index.mhtml' : format === 'md' ? 'index.md' : 'index.html';
   return `${directory}/${file}`;
 }
 
@@ -143,20 +143,19 @@ export async function migrateFlatArchive(root, { format = 'html', seedHost = '',
 
   let moved = 0;
   for (const entry of entries) {
-    if (!entry.isFile() || !/\.(?:html|mhtml)$/i.test(entry.name)) continue;
+    if (!entry.isFile() || !/\.(?:html|mhtml|md)$/i.test(entry.name)) continue;
     if (entry.name === 'index.html') continue;
 
     const source = path.join(root, entry.name);
     const pageUrl = await findArchivedFrom(source);
     if (!pageUrl) continue;
 
+    const extension = entry.name.toLowerCase().split('.').pop();
+    const entryFormat = extension === 'mhtml' ? 'mhtml' : extension === 'md' ? 'md' : format;
+
     let target;
     try {
-      target = archivePathFor(pageUrl, {
-        format: entry.name.toLowerCase().endsWith('.mhtml') ? 'mhtml' : format,
-        seedHost,
-        used,
-      });
+      target = archivePathFor(pageUrl, { format: entryFormat, seedHost, used });
     } catch {
       continue;
     }
@@ -186,7 +185,7 @@ export async function walkArchives(root) {
         await visit(path.join(directory, entry.name), relative);
         continue;
       }
-      if (!/\.(?:html|mhtml)$/i.test(entry.name)) continue;
+      if (!/\.(?:html|mhtml|md)$/i.test(entry.name)) continue;
       if (!prefix && entry.name === 'index.html') continue; // the archive's own index
       results.push(relative);
     }
