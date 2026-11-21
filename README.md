@@ -60,8 +60,8 @@ downloads/example.com/
     --max-pages <n>     pages to load while discovering posts (default: 50)
 -d, --depth <n>         how many link hops to follow from the seed (default: 2)
     --crawl-subdomains  let the crawl walk into sibling subdomains
--c, --concurrency <n>   parallel post downloads (default: 2)
-    --delay <ms>        delay before each post request (default: 600)
+-c, --concurrency <n>   parallel post downloads (default: 4)
+    --delay <ms>        delay before each post request (default: 250)
     --timeout <ms>      navigation timeout (default: 45000)
     --min-score <n>     blog-post classifier threshold (default: 3)
     --max-asset-mb <n>  largest asset to inline as data URI (default: 8)
@@ -78,6 +78,8 @@ downloads/example.com/
     --ignore-robots     ignore robots.txt
     --allow-external    allow posts on other domains
     --dry-run           list detected posts, do not download
+    --load-media        let the browser download images/fonts (slower)
+    --force             re-download posts already present in the output dir
     --headful           show the browser window
 -v, --verbose           print discovery details and score reasons
 -h, --help              show help
@@ -184,6 +186,37 @@ it tells you how many pages were left unvisited.
    bytes, asset counters, crawled pages with their depth, failures) plus a
    styled `index.html` to click through the archive.
 
+## Speed
+
+Captures are dominated by page load and asset fetching, not by disk. The
+archiver is tuned for large archives:
+
+- **The browser never downloads images, fonts or media.** The archiver fetches
+  those itself in Node, so captures drop from ~10 s to ~1.3 s on heavy
+  Next.js sites. Use `--load-media` if a site builds its DOM from images that
+  must actually load (rare).
+- **Analytics / tag-manager / session-replay hosts are aborted**, so the network
+  settles in ~350 ms instead of burning the full idle timeout.
+- **Cross-page asset cache**: stylesheets and web fonts are downloaded once per
+  run and reused by every post (256 MB in-memory cap, large media excluded).
+- **Scrolling is conditional**: it only runs when JS-driven lazy images exist;
+  `data-src` / `loading="lazy"` markup is resolved directly by the archiver.
+- **Document assembly uses two regex passes** instead of one pass per asset, so
+  a 1.7 MB page is no longer copied ~30 times.
+- **Post-level concurrency defaults to 4** (`-c 8` for a fast site).
+
+Measured on `lp.sent.dm/resources`: ~14 s/post before → **~1.3 s/post** at
+`-c 4` with a warm cache (8 posts in 10 s), so 1,500 posts take roughly half an
+hour instead of two.
+
+### Resuming
+
+Re-running the same command skips every post whose file already exists in the
+output directory; use `--force` to capture them again. An interrupted archive
+resumes where it stopped, and `manifest.json` / `index.html` are rebuilt from
+every file in the output directory — including pages left behind by an older
+run that never wrote a manifest.
+
 ## Respectful crawling
 
 - `robots.txt` is fetched once and honoured (disallow rules are skipped).
@@ -217,6 +250,9 @@ copyright rules before redistributing what you save.
 - Very heavy pages produce large files: a typical WordPress post lands around
   3–6 MB with all images and fonts embedded. Use `--no-assets` or a lower
   `--max-asset-mb` for a lighter archive.
+- **Images are not loaded by the browser**, so `srcset` selection falls back to
+  the `src` (or first `srcset`) candidate. Width/height markup keeps the layout
+  correct; use `--load-media` if you need the exact variant a visitor would get.
 - Pages that render content only after interaction (tabs, accordions) are
   captured in their initial state.
 
@@ -230,6 +266,8 @@ copyright rules before redistributing what you save.
 | Chrome not found | `npx puppeteer browsers install chrome` |
 | Post stops rendering early | Re-run just that URL with `--headful -v` |
 | Files are too big | `--no-assets`, `--max-asset-mb 2`, or `--max-asset-mb 0` |
+| Too slow | Raise `-c` (default 4), run in batches — re-runs skip finished posts |
+| A page looks unstyled / images missing | Re-run that URL with `--headful -v`; try `--load-media` |
 | Styles look wrong | `--format mhtml` produces Chrome's native single-file snapshot |
 
 ## Development

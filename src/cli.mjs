@@ -8,6 +8,7 @@ import { crawlSite, mergeCandidates } from './crawler.mjs';
 import { discoverFromSitemaps } from './sitemap.mjs';
 import { loadRobots } from './robots.mjs';
 import { buildManifest, writeOutputs } from './report.mjs';
+import { AssetCache } from './assets.mjs';
 import {
   createLogger,
   hashShort,
@@ -47,6 +48,8 @@ const CLI_OPTIONS = {
   'crawl-subdomains': { type: 'boolean' },
   sitemap: { type: 'boolean' },
   'dry-run': { type: 'boolean' },
+  'load-media': { type: 'boolean' },
+  force: { type: 'boolean' },
   headful: { type: 'boolean' },
   verbose: { type: 'boolean', short: 'v' },
   version: { type: 'boolean' },
@@ -85,8 +88,8 @@ OPTIONS
       --max-pages <n>     pages to load while discovering posts (default: 50)
   -d, --depth <n>         how many link hops to follow from the seed (default: 2)
       --crawl-subdomains  let the crawl walk into sibling subdomains
-  -c, --concurrency <n>   parallel post downloads (default: 2)
-      --delay <ms>        delay before each post request (default: 600)
+  -c, --concurrency <n>   parallel post downloads (default: 4)
+      --delay <ms>        delay before each post request (default: 250)
       --timeout <ms>      navigation timeout (default: 45000)
       --min-score <n>     blog-post classifier threshold (default: 3)
       --max-asset-mb <n>  largest asset to inline as data URI (default: 8)
@@ -103,6 +106,8 @@ OPTIONS
       --ignore-robots     ignore robots.txt
       --allow-external    allow posts on other domains
       --dry-run           list detected posts, do not download
+      --load-media        let the browser download images/fonts (slower)
+      --force             re-download posts already present in the output dir
       --headful           show the browser window
   -v, --verbose           print discovery details
   -h, --help              show this help
@@ -115,9 +120,10 @@ OUTPUT
   <out>/candidates.json      written by --dry-run
 
 NOTES
-  Only pages that look like blog posts are downloaded (scored heuristics on
-  URL shape + anchor text). robots.txt is respected by default. Please respect
-  each site's terms of service and copyright when archiving.
+  Existing posts in <out>/ are skipped on the next run (use --force to rebuild
+  them), so an interrupted archive can simply be run again. The browser never
+  downloads images, fonts or media — the archiver fetches those itself — which
+  makes captures roughly 3x faster.
 `.trim();
 
 function printHelp() {
@@ -205,6 +211,10 @@ export async function run(argv = process.argv.slice(2)) {
 
   const log = createLogger({ verbose: Boolean(values.verbose) });
 
+  if (positionals.length > 1) {
+    log.warn(`ignoring extra arguments: ${positionals.slice(1).join(' ')}`);
+  }
+
   let config;
   try {
     config = {
@@ -213,8 +223,8 @@ export async function run(argv = process.argv.slice(2)) {
       maxPosts: numberOption(values, 'max-posts', 25, { min: 1, integer: true }),
       maxPages: numberOption(values, 'max-pages', 50, { min: 1, integer: true }),
       depth: numberOption(values, 'depth', 2, { min: 0, integer: true }),
-      concurrency: numberOption(values, 'concurrency', 2, { min: 1, integer: true }),
-      delay: numberOption(values, 'delay', 600, { min: 0 }),
+      concurrency: numberOption(values, 'concurrency', 4, { min: 1, integer: true }),
+      delay: numberOption(values, 'delay', 250, { min: 0 }),
       timeout: numberOption(values, 'timeout', 45000, { min: 1000 }),
       minScore: numberOption(values, 'min-score', 3),
       maxAssetMb: numberOption(values, 'max-asset-mb', 8, { min: 0 }),
@@ -231,6 +241,9 @@ export async function run(argv = process.argv.slice(2)) {
       sitemap: Boolean(values.sitemap),
       downloadAssets: !values['no-assets'],
       dryRun: Boolean(values['dry-run']),
+      loadMedia: Boolean(values['load-media']),
+      force: Boolean(values.force),
+      assetCache: new AssetCache(),
       headful: Boolean(values.headful),
       userAgent: values['user-agent'] || DEFAULT_USER_AGENT,
       verbose: Boolean(values.verbose),
@@ -258,7 +271,7 @@ export async function run(argv = process.argv.slice(2)) {
 
   const browser = await launchBrowser({ headful: config.headful });
   const startedAt = new Date().toISOString();
-  const posts = [];
+  let posts = [];
   const failures = [];
 
   try {
@@ -313,8 +326,53 @@ export async function run(argv = process.argv.slice(2)) {
     log.info(`downloading ${selected.length} post(s) with concurrency ${config.concurrency}`);
     await fs.mkdir(config.outDir, { recursive: true });
 
+    // Resume: reuse posts already archived by a previous run unless --force.
+    const previousPosts = new Map();
+    if (!config.force) {
+      try {
+        const prior = JSON.parse(await fs.readFile(path.join(config.outDir, 'manifest.json'), 'utf8'));
+        for (const post of prior.posts || []) {
+          if (post && post.url && post.file) previousPosts.set(post.url, post);
+        }
+      } catch {
+        /* first run, nothing to resume */
+      }
+    }
+    if (previousPosts.size) log.detail(`resume: ${previousPosts.size} post(s) already in the archive`);
+    let cached = 0;
+    let downloaded = 0;
+
     const results = await mapLimit(selected, config.concurrency, async (candidate, index) => {
       const label = `[${index + 1}/${selected.length}]`;
+      const file = fileNameFor(candidate, config.format);
+
+      if (!config.force) {
+        const prior = previousPosts.get(candidate.url);
+        const priorFile = prior?.file || file;
+        try {
+          const stat = await fs.stat(path.join(config.outDir, priorFile));
+          if (stat.size > 0) {
+            log.detail(`${label} cached ${priorFile}`);
+            return {
+              ok: true,
+              cached: true,
+              post:
+                prior || {
+                  url: candidate.url,
+                  title: candidate.text || candidate.url,
+                  file: priorFile,
+                  format: config.format,
+                  bytes: stat.size,
+                  fetchedAt: stat.mtime.toISOString(),
+                  stats: {},
+                },
+            };
+          }
+        } catch {
+          /* not archived yet */
+        }
+      }
+
       if (config.delay) await sleep(config.delay);
       log.info(`${label} ${candidate.url}`);
       try {
@@ -323,7 +381,6 @@ export async function run(argv = process.argv.slice(2)) {
             ? await captureMhtml(browser, candidate.url, config)
             : await capturePage(browser, candidate.url, config);
 
-        const file = fileNameFor(candidate, config.format);
         await fs.writeFile(path.join(config.outDir, file), captured.html);
         const bytes = Buffer.byteLength(captured.html);
         log.info(
@@ -338,7 +395,13 @@ export async function run(argv = process.argv.slice(2)) {
 
     for (const result of results) {
       if (!result) continue;
+      if (result.cached) {
+        cached += 1;
+        posts.push(result.post);
+        continue;
+      }
       if (result.ok) {
+        downloaded += 1;
         posts.push({
           url: result.candidate.url,
           title: result.meta.title || result.candidate.text || result.candidate.url,
@@ -365,6 +428,35 @@ export async function run(argv = process.argv.slice(2)) {
       const parsed = Date.parse(value || '');
       return Number.isNaN(parsed) ? 0 : parsed;
     };
+    // Merge every post already in the archive so a partial/resumed run still
+    // produces a complete index: manifest entries first, then any stray files.
+    const merged = new Map();
+    for (const post of posts) merged.set(post.url || `file:${post.file}`, post);
+    for (const prior of previousPosts.values()) {
+      if (prior.url && !merged.has(prior.url)) merged.set(prior.url, prior);
+    }
+    try {
+      const knownFiles = new Set([...merged.values()].map((post) => post.file).concat('index.html'));
+      for (const name of await fs.readdir(config.outDir)) {
+        if (!/\.(?:html|mhtml)$/i.test(name) || knownFiles.has(name)) continue;
+        const stat = await fs.stat(path.join(config.outDir, name));
+        if (!stat.size) continue;
+        merged.set(`file:${name}`, {
+          url: '',
+          title: name.replace(/\.[^.]+$/, ''),
+          file: name,
+          format: name.toLowerCase().endsWith('.mhtml') ? 'mhtml' : 'html',
+          bytes: stat.size,
+          fetchedAt: stat.mtime.toISOString(),
+          stats: {},
+          recovered: true,
+        });
+      }
+    } catch {
+      /* no output dir yet */
+    }
+    posts = [...merged.values()];
+
     posts.sort((a, b) => timestamp(b.publishedAt) - timestamp(a.publishedAt) || a.title.localeCompare(b.title));
 
     const manifest = buildManifest({
@@ -392,7 +484,11 @@ export async function run(argv = process.argv.slice(2)) {
 
     const { indexPath } = await writeOutputs(config.outDir, manifest);
 
-    log.info(`done: ${posts.length} saved, ${failures.length} failed`);
+    const recovered = posts.filter((post) => post.recovered).length;
+
+    log.info(
+      `done: ${downloaded} downloaded, ${cached} cached, ${recovered} recovered from disk, ${failures.length} failed`,
+    );
     log.info(`browse the archive: ${indexPath}`);
     return posts.length ? 0 : 1;
   } finally {

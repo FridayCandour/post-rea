@@ -11,7 +11,9 @@ export function buildManifest({ seed, startedAt, finishedAt, posts, failures, ca
     finishedAt,
     counts: {
       candidates: candidates ?? posts.length + failures.length,
-      downloaded: posts.length,
+      posts: posts.length,
+      downloaded: posts.filter((post) => !post.recovered).length,
+      recovered: posts.filter((post) => post.recovered).length,
       failed: failures.length,
       pagesCrawled: Array.isArray(pages) ? pages.length : 0,
     },
@@ -26,15 +28,28 @@ function renderIndex(manifest) {
   const rows = manifest.posts
     .map((post) => {
       const date = post.publishedAt ? String(post.publishedAt).slice(0, 10) : '—';
-      const title = escapeHtml(post.title || post.url);
-      const host = escapeHtml(post.siteName || new URL(post.url).hostname);
+      const title = escapeHtml(post.title || post.url || post.file);
+      let host = post.siteName || '';
+      if (!host && post.url) {
+        try {
+          host = new URL(post.url).hostname;
+        } catch {
+          host = '';
+        }
+      }
+      const source = post.url
+        ? `<a class="source" href="${escapeHtml(post.url)}" title="Original URL">source</a>`
+        : '';
+      const meta = [host, humanBytes(post.bytes), post.wordCount ? `${post.wordCount} words` : '']
+        .filter(Boolean)
+        .join(' · ');
       return `      <li>
         <a class="post" href="./${encodeURI(post.file)}">
           <span class="date">${escapeHtml(date)}</span>
           <span class="title">${title}</span>
-          <span class="meta">${host} · ${humanBytes(post.bytes)}${post.wordCount ? ` · ${post.wordCount} words` : ''}</span>
+          <span class="meta">${escapeHtml(meta)}</span>
         </a>
-        <a class="source" href="${escapeHtml(post.url)}" title="Original URL">source</a>
+        ${source}
       </li>`;
     })
     .join('\n');
@@ -79,7 +94,7 @@ function renderIndex(manifest) {
 <main>
   <h1>Blog archive — ${seedHost}</h1>
   <p class="sub">
-    ${manifest.counts.downloaded} post(s) saved from <a href="${escapeHtml(manifest.seed)}">${escapeHtml(manifest.seed)}</a>
+    ${manifest.counts.posts} post(s) saved from <a href="${escapeHtml(manifest.seed)}">${escapeHtml(manifest.seed)}</a>
     · archived ${escapeHtml(String(manifest.finishedAt).slice(0, 10))}
     · ${manifest.counts.failed} failure(s)
   </p>

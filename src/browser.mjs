@@ -1,9 +1,37 @@
 import puppeteer from 'puppeteer';
-import { sleep } from './util.mjs';
 
 export const DEFAULT_USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) ' +
   'Chrome/148.0.0.0 Safari/537.36';
+
+/**
+ * Analytics / tag-manager / session-replay hosts. They never contribute to the
+ * captured page, but they keep the network busy (defeating network-idle) and
+ * burn CPU. Aborting them is safe.
+ */
+const TRACKER_HOSTS =
+  /(?:google-analytics\.com|googletagmanager\.com|doubleclick\.net|googlesyndication\.com|adservice\.google\.|facebook\.net|facebook\.com\/tr|hotjar\.(?:com|io)|segment\.(?:com|io)|mixpanel\.com|clarity\.ms|sentry\.io|intercom\.io|drift\.com|hubspot\.com|hs-scripts\.com|hs-analytics\.net|tiktok\.com|analytics\.tiktok\.com|linkedin\.com|snap\.li|posthog\.com|plausible\.io|vercel-insights\.com|vercel-scripts\.com|newrelic\.com|datadoghq-browser-agent\.com|fullstory\.com|smartlook\.com|mouseflow\.com|logrocket\.(?:io|com)|optimizely\.com|criteo\.(?:com|net)|taboola\.com|outbrain\.com|adroll\.com|quantserve\.com|scorecardresearch\.com|bat\.bing\.com|cloudflareinsights\.com)/i;
+
+/**
+ * The archiver downloads images/fonts/media itself (from attributes and CSS)
+ * so the browser does not need them. Aborting those requests removes the
+ * single biggest cause of slow captures.
+ */
+export async function blockHeavyResources(page) {
+  await page.setRequestInterception(true);
+  page.on('request', (request) => {
+    const type = request.resourceType();
+    if (type === 'image' || type === 'media' || type === 'font' || type === 'ping') {
+      request.abort().catch(() => {});
+      return;
+    }
+    if (TRACKER_HOSTS.test(request.url())) {
+      request.abort().catch(() => {});
+      return;
+    }
+    request.continue().catch(() => {});
+  });
+}
 
 export async function launchBrowser({ headful = false } = {}) {
   return puppeteer.launch({
@@ -48,35 +76,48 @@ export async function openPage(page, url, opts, { idleTime = 600, idleTimeout = 
   return response;
 }
 
-/** Scroll through the document so lazy-loaded images and embeds materialise. */
-export async function autoscroll(page) {
+/**
+ * Scroll through the document only when something actually needs it (JS-driven
+ * lazy images with no src/data-src). With plain `loading="lazy"` or `data-src`
+ * markup the archiver resolves sources itself, so scrolling is pure latency.
+ */
+export async function autoscroll(page, { maxSteps = 16, interval = 40 } = {}) {
   await page
-    .evaluate(async () => {
-      const step = 700;
-      const limit = 40000;
-      await new Promise((resolve) => {
-        let travelled = 0;
-        const timer = setInterval(() => {
-          const height = Math.max(
-            document.body ? document.body.scrollHeight : 0,
-            document.documentElement ? document.documentElement.scrollHeight : 0,
-          );
-          window.scrollBy(0, step);
-          travelled += step;
-          if (travelled >= height + step || travelled > limit) {
-            clearInterval(timer);
-            resolve();
-          }
-        }, 70);
-      });
-      window.scrollTo(0, 0);
-      try {
-        if (document.fonts && document.fonts.ready) await document.fonts.ready;
-      } catch {
-        /* fonts API can be missing */
-      }
-      await new Promise((resolve) => setTimeout(resolve, 300));
-    })
+    .evaluate(
+      async ({ maxSteps, interval }) => {
+        const needsScroll = [...document.images].some((img) => {
+          const src = img.getAttribute('src') || '';
+          const lazyAttr = img.getAttribute('data-src') || img.getAttribute('data-lazy-src');
+          return !lazyAttr && (!src || /^data:image\/(?:gif|png);base64,R0lGOD/i.test(src));
+        });
+
+        if (needsScroll) {
+          await new Promise((resolve) => {
+            let steps = 0;
+            const timer = setInterval(() => {
+              window.scrollBy(0, Math.round(window.innerHeight * 0.9));
+              steps += 1;
+              const height = Math.max(
+                document.body ? document.body.scrollHeight : 0,
+                document.documentElement ? document.documentElement.scrollHeight : 0,
+              );
+              if (steps >= maxSteps || window.scrollY + window.innerHeight >= height - 2) {
+                clearInterval(timer);
+                resolve();
+              }
+            }, interval);
+          });
+          window.scrollTo(0, 0);
+        }
+
+        try {
+          if (document.fonts && document.fonts.ready) await document.fonts.ready;
+        } catch {
+          /* fonts API can be missing */
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      },
+      { maxSteps, interval },
+    )
     .catch(() => {});
-  await sleep(250);
 }

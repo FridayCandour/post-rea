@@ -105,11 +105,16 @@ async function replaceAsync(input, regex, replacer) {
   return output + input.slice(cursor);
 }
 
-export function createAssetFetcher({ userAgent, referer, timeout = 30000 } = {}) {
-  const cache = new Map();
+export function createAssetFetcher({ userAgent, referer, timeout = 30000, cache } = {}) {
+  const local = new Map();
 
   return function fetchAsset(url) {
-    if (cache.has(url)) return cache.get(url);
+    if (local.has(url)) return local.get(url);
+    if (cache && cache.has(url)) {
+      const hit = Promise.resolve(cache.get(url));
+      local.set(url, hit);
+      return hit;
+    }
     const task = (async () => {
       try {
         const response = await fetch(url, {
@@ -135,9 +140,46 @@ export function createAssetFetcher({ userAgent, referer, timeout = 30000 } = {})
         return { ok: false, url, error: error.message };
       }
     })();
-    cache.set(url, task);
+    local.set(url, task);
+    if (cache) {
+      task.then((result) => {
+        if (result && result.ok) cache.set(url, result);
+      });
+    }
     return task;
   };
+}
+
+/**
+ * Cross-page asset cache. Every post on a site shares the same stylesheets and
+ * web fonts; fetching them once per crawl instead of once per post is the
+ * single biggest win on large archives. Large media is not cached so memory
+ * stays bounded.
+ */
+export class AssetCache {
+  constructor({ maxBytes = 256 * 1024 * 1024, maxEntryBytes = 512 * 1024 } = {}) {
+    this.maxBytes = maxBytes;
+    this.maxEntryBytes = maxEntryBytes;
+    this.bytes = 0;
+    this.map = new Map();
+  }
+
+  has(url) {
+    return this.map.has(url);
+  }
+
+  get(url) {
+    return this.map.get(url);
+  }
+
+  set(url, result) {
+    if (!result || !result.ok || !result.body) return;
+    if (result.size > this.maxEntryBytes) return;
+    if (this.bytes + result.size > this.maxBytes) return;
+    if (this.map.has(url)) return;
+    this.map.set(url, result);
+    this.bytes += result.size;
+  }
 }
 
 export function extensionOf(url) {

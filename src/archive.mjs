@@ -1,4 +1,4 @@
-import { createPage, openPage, autoscroll, DEFAULT_USER_AGENT } from './browser.mjs';
+import { autoscroll, blockHeavyResources, createPage, DEFAULT_USER_AGENT, openPage } from './browser.mjs';
 import {
   AssetRegistry,
   assetToken,
@@ -112,6 +112,18 @@ function prepareDocument({ keepScripts, clean, bannerMessage, cleanSelectors }) 
       })
       .join(', ');
 
+  /** Highest-resolution srcset candidate, used when the browser never loaded the image. */
+  const bestSrcsetCandidate = (value) => {
+    const candidates = splitSrcset(value).map(([url, descriptor]) => {
+      const match = /([\d.]+)\s*([wx])/i.exec(descriptor || '');
+      const weight = match ? Number(match[1]) * (match[2].toLowerCase() === 'x' ? 1000 : 1) : 0;
+      return { url, weight };
+    });
+    if (!candidates.length) return null;
+    candidates.sort((a, b) => b.weight - a.weight);
+    return candidates[0].url;
+  };
+
   const doc = document;
   let removedScriptCount = 0;
 
@@ -136,7 +148,7 @@ function prepareDocument({ keepScripts, clean, bannerMessage, cleanSelectors }) 
   doc.querySelectorAll('img').forEach((img) => {
     let chosen = img.currentSrc || img.getAttribute('src');
     if (!chosen && img.getAttribute('srcset')) {
-      chosen = splitSrcset(img.getAttribute('srcset'))[0]?.[0];
+      chosen = bestSrcsetCandidate(img.getAttribute('srcset'));
     }
     setAssetAttr(img, 'src', chosen);
     img.removeAttribute('srcset');
@@ -361,7 +373,9 @@ async function readMetadata(page) {
 export async function capturePage(browser, url, opts) {
   const page = await createPage(browser, opts);
   try {
-    const response = await openPage(page, url, opts);
+    // The browser does not need images/fonts/media: we fetch those ourselves.
+    if (!opts.loadMedia) await blockHeavyResources(page);
+    const response = await openPage(page, url, opts, { idleTime: 350, idleTimeout: 5000 });
     const status = response ? response.status() : 0;
     await autoscroll(page);
 
@@ -405,32 +419,31 @@ export async function assembleHtml(payload, opts) {
     userAgent: opts.userAgent || DEFAULT_USER_AGENT,
     timeout: opts.timeout,
     referer: payload.pageUrl,
+    cache: opts.assetCache,
   });
   const ctx = { registry, fetchAsset, seen: new Set() };
-  let html = payload.html;
+  const replacements = new Map();
 
   const stylesheetCss = await mapLimit(payload.stylesheets, 4, async (sheet) => ({
     index: sheet.index,
     css: await fetchStylesheet(sheet.href, ctx),
   }));
   for (const sheet of stylesheetCss) {
-    html = html.split(`__ARCHIVE_CSS_${sheet.index}__`).join(sheet.css);
+    replacements.set(`__ARCHIVE_CSS_${sheet.index}__`, sheet.css);
   }
 
   for (const item of payload.inlineStyles) {
-    const css = await processCss(item.css, payload.baseHref, ctx);
-    html = html.split(`__ARCHIVE_INLINE_CSS_${item.index}__`).join(css);
+    replacements.set(`__ARCHIVE_INLINE_CSS_${item.index}__`, await processCss(item.css, payload.baseHref, ctx));
   }
 
   for (const item of payload.styleAttrs) {
     const css = await processCss(item.css, payload.baseHref, ctx);
     // The CSS ends up inside a double-quoted attribute, so quotes must be entities.
-    html = html.split(`__ARCHIVE_STYLE_ATTR_${item.index}__`).join(css.replace(/"/g, '&quot;'));
+    replacements.set(`__ARCHIVE_STYLE_ATTR_${item.index}__`, css.replace(/"/g, '&quot;'));
   }
 
   const maxBytes = Math.max(0, Number(opts.maxAssetMb ?? 8)) * 1024 * 1024;
   const counters = { inlined: 0, skipped: 0, failed: 0, deferred: 0 };
-  const replacements = new Map();
 
   if (opts.downloadAssets === false) {
     for (const [index, assetUrl] of registry.entries()) {
@@ -438,7 +451,7 @@ export async function assembleHtml(payload, opts) {
       counters.deferred += 1;
     }
   } else {
-    await mapLimit(registry.entries(), 6, async ([index, assetUrl]) => {
+    await mapLimit(registry.entries(), 10, async ([index, assetUrl]) => {
       const token = `__ARCHIVE_ASSET_${index}__`;
       const asset = await fetchAsset(assetUrl);
       if (!asset.ok || !asset.body) {
@@ -456,10 +469,19 @@ export async function assembleHtml(payload, opts) {
     });
   }
 
-  for (const [token, value] of replacements) html = html.split(token).join(value);
+  // Two passes: stylesheet/CSS placeholders first (they introduce new asset
+  // tokens), then the asset tokens themselves. Splitting by token would copy
+  // the document once per token; two regex passes copy it twice.
+  let html = payload.html.replace(/__ARCHIVE_(?:CSS|INLINE_CSS|STYLE_ATTR)_\d+__/g, (token) => {
+    const value = replacements.get(token);
+    return value !== undefined ? value : token;
+  });
 
-  // Safety net: any token we never resolved falls back to its original URL.
-  html = html.replace(/__ARCHIVE_ASSET_(\d+)__/g, (match, index) => registry.byIndex.get(Number(index)) || match);
+  html = html.replace(/__ARCHIVE_ASSET_(\d+)__/g, (token, index) => {
+    const value = replacements.get(token);
+    if (value !== undefined) return value;
+    return registry.byIndex.get(Number(index)) || token;
+  });
 
   return {
     html,
