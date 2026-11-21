@@ -243,7 +243,7 @@ source: "https://example.com/resources/code-examples/vonage-redwoodjs-scheduler"
 canonical: "https://www.example.com/resources/code-examples/vonage-redwoodjs-scheduler"
 published: "2025-05-03T00:31:58.667+00:00"
 description: "Learn how to build a full-stack appointment scheduling application…"
-site: "Sent Resources"
+site: "example"
 lang: "en"
 archived: "2026-11-21T08:24:02.434Z"
 words: 6225
