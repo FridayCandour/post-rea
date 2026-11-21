@@ -298,7 +298,7 @@ archiver is tuned for large archives:
   a 1.7 MB page is no longer copied ~30 times.
 - **Post-level concurrency defaults to 4** (`-c 8` for a fast site).
 
-Measured on `lp.sent.dm/resources`: ~14 s/post before → **~1.3 s/post** at
+Measured on `example.com/resources`: ~14 s/post before → **~1.3 s/post** at
 `-c 4` with a warm cache (8 posts in 10 s), so 1,500 posts take roughly half an
 hour instead of two.
 

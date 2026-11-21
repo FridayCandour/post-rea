@@ -19,9 +19,9 @@ const posts = [
   'https://example.com/my-first-post',
   'https://example.com/engineering/how-we-scaled-to-a-million-sms',
   'https://example.com/insights/the-future-of-a2p-messaging',
-  'https://lp.sent.dm/resources/code-examples/vonage-node-js-vite-react-vue-marketing-campaigns',
-  'https://lp.sent.dm/resources/tools/fcc-direct-numbering-authorization-voip',
-  'https://lp.sent.dm/resources/area-code/area-code-201',
+  'https://example.com/resources/code-examples/vonage-node-js-vite-react-vue-marketing-campaigns',
+  'https://example.com/resources/tools/fcc-direct-numbering-authorization-voip',
+  'https://example.com/resources/area-code/area-code-201',
 ];
 
 const notPosts = [
@@ -61,9 +61,9 @@ test('classifyPost rejects listing, chrome and asset URLs', () => {
 
 test('crawlable pages include navigation hubs but never assets/feeds/auth', () => {
   for (const url of [
-    'https://lp.sent.dm/resources',
-    'https://lp.sent.dm/resources/categories/tools',
-    'https://lp.sent.dm/resources/categories/tools?page=2',
+    'https://example.com/resources',
+    'https://example.com/resources/categories/tools',
+    'https://example.com/resources/categories/tools?page=2',
     'https://example.com/blog/page/2',
     'https://example.com/about',
   ]) {
@@ -86,10 +86,10 @@ test('crawlable pages include navigation hubs but never assets/feeds/auth', () =
 
 test('leaf-under-hub detection links hubs to their sibling-depth pages', () => {
   assert.equal(
-    isLeafUnderHub('https://lp.sent.dm/resources/categories/tools', 'https://lp.sent.dm/resources/tools/fcc-numbering'),
+    isLeafUnderHub('https://example.com/resources/categories/tools', 'https://example.com/resources/tools/fcc-numbering'),
     true,
   );
-  assert.equal(isLeafUnderHub('https://lp.sent.dm/resources/categories/legal', 'https://lp.sent.dm/resources/legal/gdpr-checklist'), true);
+  assert.equal(isLeafUnderHub('https://example.com/resources/categories/legal', 'https://example.com/resources/legal/gdpr-checklist'), true);
   // Different top-level section → not a leaf link (nav/footer links stay out).
   assert.equal(isLeafUnderHub('https://example.com/blog', 'https://example.com/about'), false);
   assert.equal(isLeafUnderHub('https://example.com/blog', 'https://example.com/my-first-post'), false);
