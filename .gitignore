@@ -4,3 +4,6 @@ downloads/
 
 # Local installs (puppeteer is normally resolved from the repo root)
 node_modules/
+
+# macOS
+.DS_Store

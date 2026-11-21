@@ -265,15 +265,17 @@ function prepareDocument({ keepScripts, clean, bannerMessage, cleanSelectors }) 
 
   // 9. Provenance + basic document hygiene.
   const head = doc.head || doc.querySelector('head') || doc.documentElement;
-  const ensureMeta = (name, content) => {
+  const ensureMeta = (name, content, prepend = false) => {
     if (!content) return;
     if (head.querySelector(`meta[name="${name}"]`)) return;
     const meta = doc.createElement('meta');
     meta.setAttribute('name', name);
     meta.setAttribute('content', content);
-    head.appendChild(meta);
+    if (prepend) head.insertBefore(meta, head.firstChild);
+    else head.appendChild(meta);
   };
-  ensureMeta('archived-from', location.href);
+  // Kept first in <head> so archive tooling can read the source URL cheaply.
+  ensureMeta('archived-from', location.href, true);
   ensureMeta('archived-at', new Date().toISOString());
   ensureMeta('archived-by', 'blog-post-archiver');
 

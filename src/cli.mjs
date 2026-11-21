@@ -11,14 +11,20 @@ import { buildManifest, writeOutputs } from './report.mjs';
 import { AssetCache } from './assets.mjs';
 import {
   createLogger,
-  hashShort,
   humanBytes,
   mapLimit,
   normalizeUrl,
   siteOf,
   sleep,
-  slugify,
 } from './util.mjs';
+import {
+  archivePathFor,
+  legacyFileNameFor,
+  migrateFlatArchive,
+  migrateLegacyFile,
+  statArchive,
+  walkArchives,
+} from './paths.mjs';
 
 const VERSION = '1.0.0';
 const PACKAGE_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -50,6 +56,7 @@ const CLI_OPTIONS = {
   'dry-run': { type: 'boolean' },
   'load-media': { type: 'boolean' },
   force: { type: 'boolean' },
+  flat: { type: 'boolean' },
   headful: { type: 'boolean' },
   verbose: { type: 'boolean', short: 'v' },
   version: { type: 'boolean' },
@@ -108,6 +115,7 @@ OPTIONS
       --dry-run           list detected posts, do not download
       --load-media        let the browser download images/fonts (slower)
       --force             re-download posts already present in the output dir
+      --flat              flat file names instead of URL-shaped folders
       --headful           show the browser window
   -v, --verbose           print discovery details
   -h, --help              show this help
@@ -140,15 +148,7 @@ function numberOption(values, name, fallback, { min = 0, integer = false } = {})
   return value;
 }
 
-function fileNameFor(candidate, format) {
-  const url = new URL(candidate.url);
-  const segment = decodeURIComponent(url.pathname).replace(/\/+$/, '');
-  const slug = slugify(segment || url.hostname, 70);
-  const extension = format === 'mhtml' ? 'mhtml' : 'html';
-  return `${slug}-${hashShort(candidate.url)}.${extension}`;
-}
-
-function printCandidates(candidates, log) {
+function printCandidates(candidates, log, pathFor) {
   if (!candidates.length) {
     log.warn('no blog posts detected on the seed page');
     return;
@@ -158,7 +158,8 @@ function printCandidates(candidates, log) {
     const flags = candidate.forced ? ' [include]' : '';
     const depth = `d${candidate.depth ?? 0}`;
     log.info(`  ${candidate.score.toFixed(1).padStart(5)}  ${depth}  ${candidate.url}${flags}`);
-    log.detail(`         ${candidate.reasons.join(', ')}`);
+    const target = pathFor ? ` → ${pathFor(candidate.url)}` : '';
+    log.detail(`         ${candidate.reasons.join(', ')}${target}`);
   }
 }
 
@@ -243,6 +244,8 @@ export async function run(argv = process.argv.slice(2)) {
       dryRun: Boolean(values['dry-run']),
       loadMedia: Boolean(values['load-media']),
       force: Boolean(values.force),
+      flat: Boolean(values.flat),
+      seedHost: seed.hostname.replace(/^www\./, ''),
       assetCache: new AssetCache(),
       headful: Boolean(values.headful),
       userAgent: values['user-agent'] || DEFAULT_USER_AGENT,
@@ -259,6 +262,13 @@ export async function run(argv = process.argv.slice(2)) {
   log.info(`blog-post-archiver v${VERSION}`);
   log.info(`seed:   ${config.seedUrl}`);
   log.info(`output: ${config.outDir}`);
+
+  // URL-shaped folders; `--flat` keeps the legacy slug-hash file names.
+  const usedPaths = new Map();
+  const pathFor = (rawUrl) =>
+    config.flat
+      ? legacyFileNameFor(rawUrl, config.format)
+      : archivePathFor(rawUrl, { format: config.format, seedHost: config.seedHost, used: usedPaths });
 
   const robots = config.ignoreRobots
     ? { groups: [], sitemaps: [], loaded: false }
@@ -310,7 +320,7 @@ export async function run(argv = process.argv.slice(2)) {
     }
 
     if (config.dryRun) {
-      printCandidates(selected, log);
+      printCandidates(selected, log, pathFor);
       await fs.mkdir(config.outDir, { recursive: true });
       const dryRunPath = path.join(config.outDir, 'candidates.json');
       await fs.writeFile(dryRunPath, `${JSON.stringify(candidates, null, 2)}\n`);
@@ -326,6 +336,16 @@ export async function run(argv = process.argv.slice(2)) {
     log.info(`downloading ${selected.length} post(s) with concurrency ${config.concurrency}`);
     await fs.mkdir(config.outDir, { recursive: true });
 
+    // Reorganise pages written by older versions (flat files → URL folders).
+    if (!config.flat) {
+      const moved = await migrateFlatArchive(config.outDir, {
+        format: config.format,
+        seedHost: config.seedHost,
+        used: usedPaths,
+      });
+      if (moved) log.info(`reorganized ${moved} existing page(s) into URL folders`);
+    }
+
     // Resume: reuse posts already archived by a previous run unless --force.
     const previousPosts = new Map();
     if (!config.force) {
@@ -339,37 +359,64 @@ export async function run(argv = process.argv.slice(2)) {
       }
     }
     if (previousPosts.size) log.detail(`resume: ${previousPosts.size} post(s) already in the archive`);
+
+    // Follow a reorganisation: manifest entries may still point at old flat
+    // file names, so re-resolve them against the URL-shaped layout.
+    if (!config.flat && previousPosts.size) {
+      let remapped = 0;
+      for (const post of previousPosts.values()) {
+        if (!post.url) continue;
+        const target = pathFor(post.url);
+        if (target !== post.file && (await statArchive(config.outDir, target))) {
+          post.file = target;
+          remapped += 1;
+        }
+      }
+      if (remapped) log.detail(`resume: updated ${remapped} manifest path(s) to the folder layout`);
+    }
     let cached = 0;
     let downloaded = 0;
 
     const results = await mapLimit(selected, config.concurrency, async (candidate, index) => {
       const label = `[${index + 1}/${selected.length}]`;
-      const file = fileNameFor(candidate, config.format);
+      const file = pathFor(candidate.url);
 
       if (!config.force) {
         const prior = previousPosts.get(candidate.url);
-        const priorFile = prior?.file || file;
-        try {
-          const stat = await fs.stat(path.join(config.outDir, priorFile));
-          if (stat.size > 0) {
-            log.detail(`${label} cached ${priorFile}`);
-            return {
-              ok: true,
-              cached: true,
-              post:
-                prior || {
-                  url: candidate.url,
-                  title: candidate.text || candidate.url,
-                  file: priorFile,
-                  format: config.format,
-                  bytes: stat.size,
-                  fetchedAt: stat.mtime.toISOString(),
-                  stats: {},
-                },
-            };
+        let existing = (await statArchive(config.outDir, file)) ? file : null;
+
+        if (!existing && prior?.file && (await statArchive(config.outDir, prior.file))) {
+          existing = prior.file;
+        }
+        if (!existing && !config.flat) {
+          const migrated = await migrateLegacyFile(config.outDir, candidate.url, file, config.format);
+          if (migrated) {
+            log.detail(`${label} reorganized → ${migrated.relative}`);
+            existing = migrated.relative;
           }
-        } catch {
-          /* not archived yet */
+        }
+
+        if (existing) {
+          const stat = await statArchive(config.outDir, existing);
+          log.detail(`${label} cached ${existing}`);
+          return {
+            ok: true,
+            cached: true,
+            post:
+              prior && prior.file === existing
+                ? prior
+                : {
+                    url: candidate.url,
+                    title: prior?.title || candidate.text || candidate.url,
+                    description: prior?.description || '',
+                    publishedAt: prior?.publishedAt || '',
+                    file: existing,
+                    format: config.format,
+                    bytes: stat.size,
+                    fetchedAt: stat.mtime.toISOString(),
+                    stats: prior?.stats || {},
+                  },
+          };
         }
       }
 
@@ -381,7 +428,9 @@ export async function run(argv = process.argv.slice(2)) {
             ? await captureMhtml(browser, candidate.url, config)
             : await capturePage(browser, candidate.url, config);
 
-        await fs.writeFile(path.join(config.outDir, file), captured.html);
+        const destination = path.join(config.outDir, file);
+        await fs.mkdir(path.dirname(destination), { recursive: true });
+        await fs.writeFile(destination, captured.html);
         const bytes = Buffer.byteLength(captured.html);
         log.info(
           `${label} saved ${file} (${humanBytes(bytes)}, ${captured.stats.inlined ?? 0} asset(s) inlined)`,
@@ -437,15 +486,17 @@ export async function run(argv = process.argv.slice(2)) {
     }
     try {
       const knownFiles = new Set([...merged.values()].map((post) => post.file).concat('index.html'));
-      for (const name of await fs.readdir(config.outDir)) {
-        if (!/\.(?:html|mhtml)$/i.test(name) || knownFiles.has(name)) continue;
-        const stat = await fs.stat(path.join(config.outDir, name));
-        if (!stat.size) continue;
-        merged.set(`file:${name}`, {
+      for (const relative of await walkArchives(config.outDir)) {
+        if (knownFiles.has(relative)) continue;
+        const stat = await statArchive(config.outDir, relative);
+        if (!stat) continue;
+        const parts = relative.split('/');
+        const fallbackTitle = parts.length > 1 ? parts[parts.length - 2] : parts[parts.length - 1];
+        merged.set(`file:${relative}`, {
           url: '',
-          title: name.replace(/\.[^.]+$/, ''),
-          file: name,
-          format: name.toLowerCase().endsWith('.mhtml') ? 'mhtml' : 'html',
+          title: String(fallbackTitle).replace(/[-_]+/g, ' '),
+          file: relative,
+          format: relative.toLowerCase().endsWith('.mhtml') ? 'mhtml' : 'html',
           bytes: stat.size,
           fetchedAt: stat.mtime.toISOString(),
           stats: {},
@@ -458,6 +509,7 @@ export async function run(argv = process.argv.slice(2)) {
     posts = [...merged.values()];
 
     posts.sort((a, b) => timestamp(b.publishedAt) - timestamp(a.publishedAt) || a.title.localeCompare(b.title));
+    const recovered = posts.filter((post) => post.recovered).length;
 
     const manifest = buildManifest({
       seed: config.seedUrl,
@@ -467,6 +519,7 @@ export async function run(argv = process.argv.slice(2)) {
       failures,
       candidates: candidates.length,
       pages: discovery.pages,
+      run: { downloaded, cached, recovered },
       options: {
         format: config.format,
         maxPosts: config.maxPosts,
@@ -483,8 +536,6 @@ export async function run(argv = process.argv.slice(2)) {
     });
 
     const { indexPath } = await writeOutputs(config.outDir, manifest);
-
-    const recovered = posts.filter((post) => post.recovered).length;
 
     log.info(
       `done: ${downloaded} downloaded, ${cached} cached, ${recovered} recovered from disk, ${failures.length} failed`,

@@ -42,15 +42,44 @@ node post-rea/bin/blog-archiver.mjs https://example.com/blog
 npm start -- https://example.com/blog
 ```
 
-Output goes to `<this folder>/downloads/<site>/` (or `--out <dir>`):
+Output goes to `<this folder>/downloads/<site>/` (or `--out <dir>`) and mirrors
+the site's URL structure — every path segment becomes a folder and each page is
+its `index.html`:
 
 ```
 downloads/example.com/
-├── index.html                                  ← browse the archive
-├── manifest.json                               ← metadata + failures
-├── how-to-send-sms-without-kyc-1a2b3c.html
-└── the-future-of-a2p-messaging-9f8e7d.html
+├── index.html                                   ← browse the archive
+├── manifest.json                                ← metadata + failures
+├── blog/
+│   ├── how-to-send-sms-without-kyc/
+│   │   └── index.html
+│   └── the-future-of-a2p-messaging/
+│       └── index.html
+└── resources/
+    └── code-examples/
+        └── vonage-node-js-express-marketing-campaigns/
+            └── index.html
 ```
+
+Rules used when mapping a URL to disk:
+
+| URL | Path |
+| --- | --- |
+| `https://site.com/resources/tools/foo` | `resources/tools/foo/index.html` |
+| `https://site.com/blog/post/` | `blog/post/index.html` |
+| `https://site.com/?p=123` | `_q-1a2b3c/index.html` (query gets a folder) |
+| `https://blog.site.com/post` (seed `site.com`) | `blog.site.com/post/index.html` |
+| `https://site.com/` | `_site/index.html` |
+
+Segments are decoded and sanitised (`?`, `:`, `/`, control chars, Windows
+reserved names, trailing dots, length > 120), and two URLs that collapse to the
+same folder get a short hash suffix so nothing is overwritten. Use `--flat` for
+the old flat `slug-hash.html` naming.
+
+Archives written by older versions (flat files) are reorganised automatically on
+the next run: each file's `archived-from` meta tag is read and the file is moved
+into its folder. Saved pages now keep that meta tag as the **first** element of
+`<head>` so the mapping is always cheap to recover.
 
 ## Options
 
@@ -80,6 +109,7 @@ downloads/example.com/
     --dry-run           list detected posts, do not download
     --load-media        let the browser download images/fonts (slower)
     --force             re-download posts already present in the output dir
+    --flat              flat file names instead of URL-shaped folders
     --headful           show the browser window
 -v, --verbose           print discovery details and score reasons
 -h, --help              show help
@@ -215,7 +245,8 @@ Re-running the same command skips every post whose file already exists in the
 output directory; use `--force` to capture them again. An interrupted archive
 resumes where it stopped, and `manifest.json` / `index.html` are rebuilt from
 every file in the output directory — including pages left behind by an older
-run that never wrote a manifest.
+run that never wrote a manifest. Flat files from older versions are moved into
+their URL folders during the same run.
 
 ## Respectful crawling
 
